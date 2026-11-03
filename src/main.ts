@@ -2,9 +2,9 @@ import './style.css';
 import shader from './flat.wgsl?raw';
 import { loadMesh } from './mesh.ts';
 
-// Piece 2, step 2: the Stanford dragon, 871k triangles read from a binary file,
-// drawn flat (a front view, no lighting yet) through an index buffer.
-// See docs/ENGINEERING.md.
+// Piece 2, step 3: the Stanford dragon, 871k triangles read from a binary file,
+// drawn flat (a front view, no lighting yet) through an index buffer, placed on
+// screen by a matrix the GPU applies to every vertex. See docs/ENGINEERING.md.
 
 const canvas = document.querySelector<HTMLCanvasElement>('#viewer')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
@@ -16,29 +16,41 @@ function fail(message: string): void {
   status.classList.add('error');
 }
 
-// Step 2's stopgap: the dragon's x and y (a front view, z ignored) fitted into
-// clip space on the CPU, keeping its proportions on a canvas of any shape.
-// Rewriting every vertex on each resize is the cost step 3's matrix removes.
-function fitToClip(positions: Float32Array, aspect: number): Float32Array {
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (let i = 0; i < positions.length; i += 3) {
-    minX = Math.min(minX, positions[i]);
-    maxX = Math.max(maxX, positions[i]);
-    minY = Math.min(minY, positions[i + 1]);
-    maxY = Math.max(maxY, positions[i + 1]);
+interface Bounds {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+function boundsOf(positions: Float32Array): Bounds {
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < positions.length; i++) {
+    min[i % 3] = Math.min(min[i % 3], positions[i]);
+    max[i % 3] = Math.max(max[i % 3], positions[i]);
   }
-  const centreX = (minX + maxX) / 2, halfX = (maxX - minX) / 2;
-  const centreY = (minY + maxY) / 2, halfY = (maxY - minY) / 2;
-  // Clip space spans -1..1 on both axes whatever the canvas's shape, so x is
-  // divided by the aspect ratio to make a unit as many pixels across as up.
-  const scale = 0.9 * Math.min(aspect / halfX, 1 / halfY);
-  const vertexCount = positions.length / 3;
-  const flat = new Float32Array(vertexCount * 2);
-  for (let v = 0; v < vertexCount; v++) {
-    flat[2 * v] = ((positions[3 * v] - centreX) * scale) / aspect;
-    flat[2 * v + 1] = (positions[3 * v + 1] - centreY) * scale;
-  }
-  return flat;
+  return { min, max };
+}
+
+// A front view of the model (looking down -z), fitted to the canvas: step 2's
+// fit, written as a matrix the GPU applies, so a resize sends 64 bytes instead
+// of rewriting every vertex. Row by row:
+//   x' = (x - cx) * s / aspect   clip space spans -1..1 whatever the canvas's
+//   y' = (y - cy) * s            shape, so x is divided by the aspect ratio
+//   z' = 0.5 - (z - cz) * sz     nearer is smaller, inside 0..1 for step 4's depth test
+//   w' = 1
+// WGSL matrices are column-major: the array lists column 0, then 1, 2, 3, and
+// the translation sits in the last column.
+function modelToClip({ min, max }: Bounds, aspect: number): Float32Array {
+  const [cx, cy, cz] = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
+  const [hx, hy, hz] = [0, 1, 2].map((i) => (max[i] - min[i]) / 2);
+  const s = 0.9 * Math.min(aspect / hx, 1 / hy);
+  const sz = 0.45 / hz;
+  return new Float32Array([
+    s / aspect, 0, 0, 0,
+    0, s, 0, 0,
+    0, 0, -sz, 0,
+    (-cx * s) / aspect, -cy * s, 0.5 + cz * sz, 1,
+  ]);
 }
 
 async function main(): Promise<void> {
@@ -78,11 +90,19 @@ async function main(): Promise<void> {
   });
   device.queue.writeBuffer(indexBuffer, 0, mesh.indices);
 
-  // Two floats per vertex, rewritten by fitToClip whenever the canvas resizes.
+  // The positions as they are in the file, x, y and z, copied once.
   const vertexBuffer = device.createBuffer({
-    size: mesh.vertexCount * 2 * 4,
+    size: mesh.positions.byteLength,
     usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
   });
+  device.queue.writeBuffer(vertexBuffer, 0, mesh.positions);
+
+  // One 4x4 float32 matrix, 64 bytes, rewritten whenever the canvas resizes.
+  const uniformBuffer = device.createBuffer({
+    size: 16 * 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const bounds = boundsOf(mesh.positions);
 
   const module = device.createShaderModule({ code: shader });
   const pipeline = device.createRenderPipeline({
@@ -90,14 +110,21 @@ async function main(): Promise<void> {
     vertex: {
       module,
       entryPoint: 'vs',
-      // How to read the buffer: step 8 bytes per vertex, and hand bytes 0-7
-      // of each step to the shader's @location(0) as two floats.
+      // How to read the buffer: step 12 bytes per vertex, and hand bytes 0-11
+      // of each step to the shader's @location(0) as three floats.
       buffers: [{
-        arrayStride: 2 * 4,
-        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x2' }],
+        arrayStride: 3 * 4,
+        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
       }],
     },
     fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+  });
+
+  // Connects the uniform buffer to the shader's @group(0) @binding(0). With
+  // layout 'auto', the pipeline worked out that slot's shape from the shader.
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
   });
 
   // An arrow function, not a hoisted declaration, so TypeScript knows the
@@ -113,6 +140,7 @@ async function main(): Promise<void> {
       }],
     });
     pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
     pass.setVertexBuffer(0, vertexBuffer);
     pass.setIndexBuffer(indexBuffer, 'uint32');
     pass.drawIndexed(mesh.triangleCount * 3);
@@ -127,7 +155,7 @@ async function main(): Promise<void> {
     const dpr = window.devicePixelRatio;
     canvas.width = Math.max(1, Math.min(Math.round(canvas.clientWidth * dpr), maxSize));
     canvas.height = Math.max(1, Math.min(Math.round(canvas.clientHeight * dpr), maxSize));
-    device.queue.writeBuffer(vertexBuffer, 0, fitToClip(mesh.positions, canvas.width / canvas.height));
+    device.queue.writeBuffer(uniformBuffer, 0, modelToClip(bounds, canvas.width / canvas.height));
     draw();
   }).observe(canvas);
 }

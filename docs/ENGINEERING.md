@@ -98,7 +98,7 @@ credited; the raytracer README and the dev.to profile link here.
 
 | # | Piece | Check | Status |
 |---|---|---|---|
-| 1 | WebGPU device, a triangle on screen, Vite + TypeScript, deployed to Pages | Live URL shows it | Verified locally 3 Nov (dev server and production build); not yet on GitHub |
+| 1 | WebGPU device, a triangle on screen, Vite + TypeScript, deployed to Pages | Live URL shows it | ✅ Live 3 Nov at [ibukunsanni.github.io](https://ibukunsanni.github.io/) (commit `8cfa9f6`, deploy 41 s), showing step 2's flat dragon, clean console |
 | 2 | Load the dragon (converted once to a binary vertex/index file), draw it lit, orbit and zoom | ~871k triangles at 60 fps; frame time on screen | -- |
 | 2b | The stage: the dragon on a procedural stained-glass platform in a dark void (Voronoi panes, dark leading between them, light glowing through), all in WGSL | Still 60 fps with the platform in; no texture files, the glass is computed | -- |
 | 3 | Picking: a click casts a ray against a BVH over the dragon, on the CPU in TypeScript | The picked point is marked where the cursor was; pick time on screen | -- |
@@ -113,7 +113,7 @@ read front to back; each step reads one chapter of WebGPU Fundamentals
 |---|---|---|---|---|
 | 1 | **Vertex buffer.** The corners move from the shader into GPU memory | *Fundamentals*, *Vertex Buffers* | The same pixels as before (a refactor) | ✅ 3 Nov: fingerprint `137947c5`, 170,132 lit pixels at 1148×824, before and after |
 | 2 | **The data and an index buffer.** The dragon's PLY converted once to a binary file, drawn flat with step 1's pipeline | *Vertex Buffers*, its index-buffer section | Counts read from the PLY header; the binary reads back identical to the parse; the silhouette on screen | ✅ 3 Nov: 437,645 vertices, 871,414 triangles, 15.7 MB; round trip bit-identical, spot-checked independently; silhouette undistorted at desktop and phone shapes, production build, clean console |
-| 3 | **Uniform buffer and bind group.** A matrix moves the model | *Uniforms* | The model moves when the matrix changes | -- |
+| 3 | **Uniform buffer and bind group.** A matrix moves the model | *Uniforms* | The model moves when the matrix changes | ✅ 3 Nov: a resize writes 64 bytes instead of 3,501,160; the frame identical to step 2's (hash `5359e105`, 443,210 lit pixels at 1148×824, 0 differing); re-fits at phone shape |
 | 4 | **Depth buffer.** Far triangles painting over near ones, then fixed | *Perspective Projection* | The nearest surface wins at every pixel, from any angle | -- |
 | 5 | **Normals and Lambert shading** | *Directional Lighting* | The dragon lit, its brightness following the light | -- |
 | 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown | -- |
@@ -125,9 +125,11 @@ writes a 16-byte header (`'MESH'`, version, vertex and triangle counts) and
 then the two arrays exactly as they sit in memory, so the browser takes
 typed-array views of the download instead of parsing it. Measured 3
 November: 5.25 MB of positions and 10.46 MB of indices, 15.7 MB in all
-against 33.8 MB of PLY text, converted in 1.3 s. Over a real connection
-15.7 MB is seconds, not milliseconds: measure the load on Pages, and only
-then consider quantised positions or compressed indices.
+against 33.8 MB of PLY text, converted in 1.3 s. **On Pages, measured
+3 November:** Pages gzips it, so it crosses the network as 6.9 MB (44%) and
+loaded in 1.05 s over HTTP/2 on the development laptop's connection.
+Quantised positions or compressed indices wait until a slower connection
+measures as a problem.
 
 **Piece 3 reuses the raytracer's BVH.** The same tree as step 8, written again
 in TypeScript: bounds per node, the slab test, nearest hit. The pick time on
@@ -375,3 +377,16 @@ committed, so the page can serve it.
   CPU work that needs no new WebGPU concept except an index buffer, and
   drawing it flat with step 1's pipeline proves the file is right before
   the camera and lighting steps build on it.
+
+**3 November, step 3.**
+
+- **The prediction was wrong, and that was the finding.** Moving the fit
+  from float64 on the CPU to a float32 matrix on the GPU was predicted to
+  change a few edge pixels; none changed. The rasteriser snaps each vertex
+  to a fixed sub-pixel grid (Direct3D, which Chrome uses on Windows, requires
+  at least 1/256 of a pixel) before testing coverage, and the float32
+  difference here is about 1/10,000 of a pixel, so both snap to the same
+  points.
+- **The matrix already maps depth.** z goes to 0.5 - (z - cz)·sz, nearer
+  smaller and inside 0..1, unused until step 4's depth test; without a depth
+  buffer it only has to stay inside the clip range.
