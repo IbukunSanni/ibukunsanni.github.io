@@ -118,6 +118,16 @@ read front to back; each step reads one chapter of WebGPU Fundamentals
 | 5 | **Normals and Lambert shading** | *Directional Lighting* | The dragon lit, its brightness following the light | ✅ 3 Nov: light from the right lit the right silhouette edge (mean red 187.9) and left the left at 0; from the left, 189.0 and 0. Normals unit length, outward at the model's extremes, 18--25 ms on load. Production build identical (`b600ca8d` at 1148×824), clean console, phone shape |
 | 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown; step 4's depth check from orbited angles | ✅ 3 Nov: idle 16.7 ms median, 17.0 ms p99, 17.3 ms worst; orbiting 16.7, 16.9, 17.0 (360 frames each at 1920×1080). Triangles in reverse order gave identical frames from the front, back, above and side (1600×1000). Zoom clamped both ways; phone shape, production build, clean console |
 
+**Piece 2b, the same way.** *Proposed 3 November.* The glass is computed per
+pixel in the fragment shader; no image files.
+
+| Step | Adds | Read first | Check | Status |
+|---|---|---|---|---|
+| 1 | **A second object.** The platform, a disc under the dragon's feet: its corners made in the vertex shader from `vertex_index`, with no vertex buffer, drawn in the same pass with the same camera and depth buffer | *Fundamentals* (its first triangle, made the same way) | The dragon stands on it; drawing the platform first or last gives identical frames, from above, level and below | ✅ 3 Nov: platform first or last, 0 pixels differed from above (`01320c5a`), level with the dragon's centre (`6942ad49`) and below (`807ecec0`) at 1600×1000. Still 60 fps at 1920×1080, idle and orbiting (16.7 ms median, 16.9 ms p99); production build identical, clean console, phone shape |
+| 2 | **Voronoi panes.** Random points on the disc; each pixel takes the colour of the nearest. Every point tested first, then only those in the 3×3 grid cells around the pixel | *The Book of Shaders*, *Cellular Noise* | Flat-coloured panes; the grid version's frame identical to testing every point | -- |
+| 3 | **The leading.** Dark lines along the pane borders, from each pixel's distance to the nearest border, anti-aliased with screen-space derivatives (`fwidth`) | Inigo Quilez, *Voronoi: distances to borders* | Lines of even width; no shimmer while orbiting | -- |
+| 4 | **Light through the glass.** Panes glowing in their colour, the void around them, the glow lighting the dragon from below, output in sRGB | *Timing Performance* (timestamp queries) | Piece 2b's check: 60 fps at 1920×1080 with the platform in, and GPU time per frame with and without it | -- |
+
 **Piece 2's data, simplest first.** Positions as `float32` and indices as `uint32`
 (the dragon has more than 65,535 vertices, so 16-bit indices cannot address
 it), normals computed on load from the triangles. `tools/ply-to-mesh.mjs`
@@ -472,3 +482,28 @@ committed, so the page can serve it.
 - **Not done:** two-finger pinch zoom on phones (one finger orbits); a
   trackpad pinch arrives as a ctrl+wheel event and is handled, but only
   tested with synthetic events, not on the real trackpad.
+
+**3 November, piece 2b, step 1.**
+
+- **A world space between the model and the camera.** The fit (dragon centred,
+  radius 1) is now the world; the camera is one world-to-clip matrix, and each
+  object's matrix is that times its own placement. The platform's own space is
+  the unit disc at y = 0, scaled to radius 1.2 (the dragon reaches 0.94 from
+  its vertical axis) and lowered to the dragon's lowest point, −0.654.
+- **The platform is a square with its corners cut away per pixel.** Six
+  corners made from `vertex_index` and no vertex buffer; the fragment shader
+  discards pixels more than 1 from the centre, so the edge stays round at any
+  zoom.
+- **The prediction was wrong: no z-fighting.** 2,524 of the dragon's vertices
+  are within 0.005 of its lowest point, so its flat underside was expected to
+  tie with the platform in depth when seen from below. It did not: seen from
+  below, the whole dragon is on the far side of the platform's plane, and
+  only its single lowest vertex lies in it, so the platform wins everywhere it
+  covers. No offset was needed.
+- **Near and far now hug the sphere holding both objects**, radius 1.367
+  (the platform's rim), not the dragon's. Zoomed in, the camera can be inside
+  that sphere, so near is kept at least 0.05 in front of it; checked at
+  zoom 2 with the camera level with the platform and inside its radius.
+- **The camera still frames the dragon, not the platform.** On a phone the
+  platform runs off both sides, and at the default pitch it is seen from only
+  0.654 above. Framing and the default angle belong to step 4's look.

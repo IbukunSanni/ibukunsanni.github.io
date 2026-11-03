@@ -1,13 +1,14 @@
 import './style.css';
-import shader from './lit.wgsl?raw';
+import dragonShader from './lit.wgsl?raw';
+import platformShader from './platform.wgsl?raw';
 import { loadMesh, vertexNormals } from './mesh.ts';
 import { multiply, perspective, rotationX, rotationY, scaling, translation, type Mat4 } from './mat4.ts';
 
-// Piece 2, step 6: the Stanford dragon, 871k triangles read from a binary file,
-// drawn through an index buffer with a depth buffer, lit by one directional
-// light from normals computed on load, redrawn every frame from an orbit
-// camera the visitor turns and zooms, with the frame time on screen. See
-// docs/ENGINEERING.md.
+// Piece 2b, step 1: the Stanford dragon, 871k triangles read from a binary
+// file, drawn through an index buffer with a depth buffer, lit by one
+// directional light from normals computed on load, standing on a platform
+// drawn in the same pass, redrawn every frame from an orbit camera the visitor
+// turns and zooms, with the frame time on screen. See docs/ENGINEERING.md.
 
 const canvas = document.querySelector<HTMLCanvasElement>('#viewer')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
@@ -22,8 +23,10 @@ function fail(message: string): void {
 
 // Moves the model's centre to the origin and scales it so its farthest vertex
 // is 1 away. Every distance after this is in model radii, and the whole model
-// stays inside the unit sphere whichever way it is turned.
-function fitToUnitSphere(positions: Float32Array): Mat4 {
+// stays inside the unit sphere whichever way it is turned. That space is the
+// world: the platform and the light are placed in it. Also returns the height
+// of the model's lowest point there, where the platform goes.
+function fitToUnitSphere(positions: Float32Array): { fit: Mat4; lowest: number } {
   const min = [Infinity, Infinity, Infinity];
   const max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < positions.length; i++) {
@@ -38,8 +41,16 @@ function fitToUnitSphere(positions: Float32Array): Mat4 {
     const dz = positions[i + 2] - cz;
     farthest = Math.max(farthest, dx * dx + dy * dy + dz * dz);
   }
-  return multiply(scaling(1 / Math.sqrt(farthest)), translation(-cx, -cy, -cz));
+  const radius = Math.sqrt(farthest);
+  return {
+    fit: multiply(scaling(1 / radius), translation(-cx, -cy, -cz)),
+    lowest: (min[1] - cy) / radius,
+  };
 }
+
+// The platform's radius in the world. The dragon reaches 0.94 from its
+// vertical axis, so 1.2 leaves a margin all round.
+const platformRadius = 1.2;
 
 const fovY = Math.PI / 4; // the camera's view, top to bottom: 45 degrees
 
@@ -57,19 +68,23 @@ function fitDistance(aspect: number): number {
 // the camera twice as close as the fit.
 const orbit = { yaw: 0, pitch: 0, zoom: 1 };
 
-// Model to clip space, rebuilt every frame (64 bytes), applied right to left:
-//   fit       centre at the origin, radius 1
+// World to clip space, the camera, rebuilt every frame and applied right to
+// left:
 //   turn      yaw, then pitch
-//   back off  the camera is at the origin looking down -z, so the model moves
+//   back off  the camera is at the origin looking down -z, so the world moves
 //             `distance` away from it instead
-//   project   perspective, depth 0 at the sphere's near side and 1 at its far
-//             side, so the depth buffer's precision is spent on the model
-function modelToClip(fit: Mat4, aspect: number): Mat4 {
+//   project   perspective, depth 0 at the near side of the sphere holding
+//             everything drawn (`reach` from the origin) and 1 at its far
+//             side, so the depth buffer's precision is spent on the scene
+// Each object's matrix is this times its own placement in the world. Zoomed
+// in, the camera can be inside that sphere though never inside the dragon,
+// so the near side is kept a little in front of the camera.
+function worldToClip(aspect: number, reach: number): Mat4 {
   const distance = fitDistance(aspect) / orbit.zoom;
   const turn = multiply(rotationX(orbit.pitch), rotationY(orbit.yaw));
   const view = multiply(translation(0, 0, -distance), turn);
-  const projection = perspective(fovY, aspect, distance - 1, distance + 1);
-  return multiply(projection, multiply(view, fit));
+  const projection = perspective(fovY, aspect, Math.max(distance - reach, 0.05), distance + reach);
+  return multiply(projection, view);
 }
 
 // Drag to turn the model; wheel, or pinch on a trackpad, to zoom. Pointer
@@ -173,23 +188,31 @@ async function main(): Promise<void> {
   });
   device.queue.writeBuffer(normalBuffer, 0, normals);
 
-  // One 4x4 float32 matrix, 64 bytes, rewritten every frame.
-  const uniformBuffer = device.createBuffer({
+  // One 4x4 float32 matrix per object, 64 bytes each, rewritten every frame.
+  const matrixBuffer = (): GPUBuffer => device.createBuffer({
     size: 16 * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const fit = fitToUnitSphere(mesh.positions);
+  const dragonUniforms = matrixBuffer();
+  const platformUniforms = matrixBuffer();
+
+  // Where each object sits in the world. The platform's top is level with the
+  // dragon's lowest point, and `reach` is the radius of the sphere around the
+  // origin that holds them both, for the camera's near and far.
+  const { fit, lowest } = fitToUnitSphere(mesh.positions);
+  const platform = multiply(translation(0, lowest, 0), scaling(platformRadius));
+  const reach = Math.max(1, Math.hypot(platformRadius, lowest));
 
   // One depth value per pixel: how near the surface drawn there so far is. A
   // fragment is kept only if it is nearer ('less') than what its pixel holds,
   // so which surface wins no longer depends on the order triangles arrive in.
   const depthFormat = 'depth24plus';
 
-  const module = device.createShaderModule({ code: shader });
-  const pipeline = device.createRenderPipeline({
+  const dragonModule = device.createShaderModule({ code: dragonShader });
+  const dragonPipeline = device.createRenderPipeline({
     layout: 'auto',
     vertex: {
-      module,
+      module: dragonModule,
       entryPoint: 'vs',
       // How to read the buffers: in each, step 12 bytes per vertex and hand
       // the step's three floats to the shader, slot 0's to @location(0) (the
@@ -199,15 +222,29 @@ async function main(): Promise<void> {
         { arrayStride: 3 * 4, attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }] },
       ],
     },
-    fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    fragment: { module: dragonModule, entryPoint: 'fs', targets: [{ format }] },
     depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
   });
 
-  // Connects the uniform buffer to the shader's @group(0) @binding(0). With
-  // layout 'auto', the pipeline worked out that slot's shape from the shader.
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: uniformBuffer } }],
+  // The platform's pipeline reads no buffers: its shader makes the corners.
+  const platformModule = device.createShaderModule({ code: platformShader });
+  const platformPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: platformModule, entryPoint: 'vs' },
+    fragment: { module: platformModule, entryPoint: 'fs', targets: [{ format }] },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
+  });
+
+  // Connects each object's matrix to its shader's @group(0) @binding(0). With
+  // layout 'auto', each pipeline worked out that slot's shape from its shader,
+  // so each needs its own bind group.
+  const dragonBindGroup = device.createBindGroup({
+    layout: dragonPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: dragonUniforms } }],
+  });
+  const platformBindGroup = device.createBindGroup({
+    layout: platformPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: platformUniforms } }],
   });
 
   // An arrow function, not a hoisted declaration, so TypeScript knows the
@@ -228,12 +265,17 @@ async function main(): Promise<void> {
         depthStoreOp: 'discard', // needed only during the pass, never shown
       },
     });
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bindGroup);
+    // Two draws into the same colour and depth buffers, so whichever surface
+    // is nearer wins at each pixel, whatever object it belongs to.
+    pass.setPipeline(dragonPipeline);
+    pass.setBindGroup(0, dragonBindGroup);
     pass.setVertexBuffer(0, vertexBuffer);
     pass.setVertexBuffer(1, normalBuffer);
     pass.setIndexBuffer(indexBuffer, 'uint32');
     pass.drawIndexed(mesh.triangleCount * 3);
+    pass.setPipeline(platformPipeline);
+    pass.setBindGroup(0, platformBindGroup);
+    pass.draw(6); // two triangles
     pass.end();
     device.queue.submit([encoder.finish()]);
   };
@@ -251,7 +293,9 @@ async function main(): Promise<void> {
         usage: GPUTextureUsage.RENDER_ATTACHMENT,
       });
     }
-    device.queue.writeBuffer(uniformBuffer, 0, modelToClip(fit, canvas.width / canvas.height));
+    const camera = worldToClip(canvas.width / canvas.height, reach);
+    device.queue.writeBuffer(dragonUniforms, 0, multiply(camera, fit));
+    device.queue.writeBuffer(platformUniforms, 0, multiply(camera, platform));
     draw(depthTexture.createView());
   };
 

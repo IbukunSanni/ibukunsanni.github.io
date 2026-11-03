@@ -20,8 +20,9 @@ struct VertexOut {
 fn vs(@location(0) position: vec3f, @location(1) normal: vec3f) -> VertexOut {
   var out: VertexOut;
   out.position = uniforms.modelToClip * vec4f(position, 1.0);
-  // Lit in model space, which is also the world: orbiting moves the camera
-  // around the dragon, not the light, so the normal is passed on as it is.
+  // Lit in model space. The fit into the world only moves and scales the
+  // dragon, so directions are the same in both, and orbiting moves the camera,
+  // not the light, so the normal is passed on as it is.
   out.normal = normal;
   return out;
 }
