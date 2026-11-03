@@ -20,14 +20,14 @@ struct VertexOut {
 fn vs(@location(0) position: vec3f, @location(1) normal: vec3f) -> VertexOut {
   var out: VertexOut;
   out.position = uniforms.modelToClip * vec4f(position, 1.0);
-  // Lit in model space: nothing rotates the dragon yet, so the normal is
-  // passed on as it is.
+  // Lit in model space, which is also the world: orbiting moves the camera
+  // around the dragon, not the light, so the normal is passed on as it is.
   out.normal = normal;
   return out;
 }
 
 // The direction towards the light, in model space (x right, y up, z towards
-// the viewer): above, to the left and in front.
+// the camera's starting place): above, to the left and in front.
 const toLight = normalize(vec3f(-0.5, 0.6, 0.6));
 
 // Light reaching every surface whatever way it faces, a stand-in for light

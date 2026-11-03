@@ -1,15 +1,17 @@
 import './style.css';
 import shader from './lit.wgsl?raw';
 import { loadMesh, vertexNormals } from './mesh.ts';
+import { multiply, perspective, rotationX, rotationY, scaling, translation, type Mat4 } from './mat4.ts';
 
-// Piece 2, step 5: the Stanford dragon, 871k triangles read from a binary file,
-// drawn from the front through an index buffer, placed on screen by a matrix
-// the GPU applies to every vertex, with a depth buffer so the nearest surface
-// wins at every pixel, lit by one directional light from normals computed on
-// load. See docs/ENGINEERING.md.
+// Piece 2, step 6: the Stanford dragon, 871k triangles read from a binary file,
+// drawn through an index buffer with a depth buffer, lit by one directional
+// light from normals computed on load, redrawn every frame from an orbit
+// camera the visitor turns and zooms, with the frame time on screen. See
+// docs/ENGINEERING.md.
 
 const canvas = document.querySelector<HTMLCanvasElement>('#viewer')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
+const stats = document.querySelector<HTMLParagraphElement>('#stats')!;
 
 // Every way the viewer can fail ends here: one message, centred, instead of a
 // blank page. Piece 4 replaces this with a pre-rendered image.
@@ -18,41 +20,103 @@ function fail(message: string): void {
   status.classList.add('error');
 }
 
-interface Bounds {
-  min: [number, number, number];
-  max: [number, number, number];
-}
-
-function boundsOf(positions: Float32Array): Bounds {
-  const min: [number, number, number] = [Infinity, Infinity, Infinity];
-  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+// Moves the model's centre to the origin and scales it so its farthest vertex
+// is 1 away. Every distance after this is in model radii, and the whole model
+// stays inside the unit sphere whichever way it is turned.
+function fitToUnitSphere(positions: Float32Array): Mat4 {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
   for (let i = 0; i < positions.length; i++) {
     min[i % 3] = Math.min(min[i % 3], positions[i]);
     max[i % 3] = Math.max(max[i % 3], positions[i]);
   }
-  return { min, max };
+  const [cx, cy, cz] = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
+  let farthest = 0; // squared
+  for (let i = 0; i < positions.length; i += 3) {
+    const dx = positions[i] - cx;
+    const dy = positions[i + 1] - cy;
+    const dz = positions[i + 2] - cz;
+    farthest = Math.max(farthest, dx * dx + dy * dy + dz * dz);
+  }
+  return multiply(scaling(1 / Math.sqrt(farthest)), translation(-cx, -cy, -cz));
 }
 
-// A front view of the model (looking down -z), fitted to the canvas: step 2's
-// fit, written as a matrix the GPU applies, so a resize sends 64 bytes instead
-// of rewriting every vertex. Row by row:
-//   x' = (x - cx) * s / aspect   clip space spans -1..1 whatever the canvas's
-//   y' = (y - cy) * s            shape, so x is divided by the aspect ratio
-//   z' = 0.5 - (z - cz) * sz     nearer is smaller, inside 0..1 for the depth test
-//   w' = 1
-// WGSL matrices are column-major: the array lists column 0, then 1, 2, 3, and
-// the translation sits in the last column.
-function modelToClip({ min, max }: Bounds, aspect: number): Float32Array {
-  const [cx, cy, cz] = [0, 1, 2].map((i) => (min[i] + max[i]) / 2);
-  const [hx, hy, hz] = [0, 1, 2].map((i) => (max[i] - min[i]) / 2);
-  const s = 0.9 * Math.min(aspect / hx, 1 / hy);
-  const sz = 0.45 / hz;
-  return new Float32Array([
-    s / aspect, 0, 0, 0,
-    0, s, 0, 0,
-    0, 0, -sz, 0,
-    (-cx * s) / aspect, -cy * s, 0.5 + cz * sz, 1,
-  ]);
+const fovY = Math.PI / 4; // the camera's view, top to bottom: 45 degrees
+
+// How far back the camera sits for the unit sphere to just fit: the sphere
+// touches the edges of the view when sin(half the view's angle) = 1 / distance,
+// taking the narrower of the vertical and horizontal angles.
+function fitDistance(aspect: number): number {
+  const halfY = fovY / 2;
+  const halfX = Math.atan(aspect * Math.tan(halfY));
+  return 1 / Math.sin(Math.min(halfX, halfY));
+}
+
+// What the visitor controls: yaw turns the model about the vertical, pitch
+// tips it towards or away from the camera (both in radians), and zoom 2 puts
+// the camera twice as close as the fit.
+const orbit = { yaw: 0, pitch: 0, zoom: 1 };
+
+// Model to clip space, rebuilt every frame (64 bytes), applied right to left:
+//   fit       centre at the origin, radius 1
+//   turn      yaw, then pitch
+//   back off  the camera is at the origin looking down -z, so the model moves
+//             `distance` away from it instead
+//   project   perspective, depth 0 at the sphere's near side and 1 at its far
+//             side, so the depth buffer's precision is spent on the model
+function modelToClip(fit: Mat4, aspect: number): Mat4 {
+  const distance = fitDistance(aspect) / orbit.zoom;
+  const turn = multiply(rotationX(orbit.pitch), rotationY(orbit.yaw));
+  const view = multiply(translation(0, 0, -distance), turn);
+  const projection = perspective(fovY, aspect, distance - 1, distance + 1);
+  return multiply(projection, multiply(view, fit));
+}
+
+// Drag to turn the model; wheel, or pinch on a trackpad, to zoom. Pointer
+// events cover a mouse, a pen and one finger alike.
+function listenForOrbit(): void {
+  const radiansPerPixel = 0.01;
+  let dragging: number | null = null; // the pointer turning the model
+  let lastX = 0;
+  let lastY = 0;
+  canvas.addEventListener('pointerdown', (e) => {
+    dragging = e.pointerId;
+    lastX = e.clientX;
+    lastY = e.clientY;
+    canvas.setPointerCapture(e.pointerId); // keep the moves even off the canvas
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerId !== dragging) return;
+    orbit.yaw += (e.clientX - lastX) * radiansPerPixel;
+    const pitch = orbit.pitch + (e.clientY - lastY) * radiansPerPixel;
+    orbit.pitch = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, pitch));
+    lastX = e.clientX;
+    lastY = e.clientY;
+  });
+  const release = (e: PointerEvent): void => {
+    if (e.pointerId === dragging) dragging = null;
+  };
+  canvas.addEventListener('pointerup', release);
+  canvas.addEventListener('pointercancel', release);
+  // A trackpad pinch arrives as a wheel event with ctrlKey set, and the
+  // browser would zoom the page unless the event is cancelled, which a
+  // passive listener cannot do. Zoom stays between 0.5 and 2: at 2 the
+  // camera is still outside the unit sphere, so never inside the dragon.
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    orbit.zoom = Math.max(0.5, Math.min(2, orbit.zoom * Math.exp(-e.deltaY * 0.001)));
+  }, { passive: false });
+}
+
+// The last 300 frame intervals, 5 seconds at 60 Hz, from requestAnimationFrame's
+// timestamps: the rate the visitor sees, including any frame that came late.
+const intervals: number[] = [];
+
+function showFrameTimes(): void {
+  const sorted = [...intervals].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const p99 = sorted[Math.ceil(sorted.length * 0.99) - 1];
+  stats.textContent = `${Math.round(1000 / median)} fps · ${median.toFixed(1)} ms median · ${p99.toFixed(1)} ms p99`;
 }
 
 async function main(): Promise<void> {
@@ -109,12 +173,12 @@ async function main(): Promise<void> {
   });
   device.queue.writeBuffer(normalBuffer, 0, normals);
 
-  // One 4x4 float32 matrix, 64 bytes, rewritten whenever the canvas resizes.
+  // One 4x4 float32 matrix, 64 bytes, rewritten every frame.
   const uniformBuffer = device.createBuffer({
     size: 16 * 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const bounds = boundsOf(mesh.positions);
+  const fit = fitToUnitSphere(mesh.positions);
 
   // One depth value per pixel: how near the surface drawn there so far is. A
   // fragment is kept only if it is nearer ('less') than what its pixel holds,
@@ -174,25 +238,55 @@ async function main(): Promise<void> {
     device.queue.submit([encoder.finish()]);
   };
 
-  // Keep the drawing buffer at the canvas's real pixel size, so the image
-  // stays sharp and undistorted, and refit and redraw whenever that size changes.
-  const maxSize = device.limits.maxTextureDimension2D;
+  // One frame: the camera as it is now, then the draw.
   let depthTexture: GPUTexture | null = null;
+  const render = (): void => {
+    // The depth buffer must match the canvas pixel for pixel, so it is
+    // replaced whenever the canvas changes size.
+    if (!depthTexture || depthTexture.width !== canvas.width || depthTexture.height !== canvas.height) {
+      depthTexture?.destroy();
+      depthTexture = device.createTexture({
+        size: [canvas.width, canvas.height],
+        format: depthFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+    }
+    device.queue.writeBuffer(uniformBuffer, 0, modelToClip(fit, canvas.width / canvas.height));
+    draw(depthTexture.createView());
+  };
+
+  // Keep the drawing buffer at the canvas's real pixel size, so the image
+  // stays sharp and undistorted. Resizing clears the canvas, so draw again at
+  // once rather than show a blank frame until the next one.
+  const maxSize = device.limits.maxTextureDimension2D;
   new ResizeObserver(() => {
     const dpr = window.devicePixelRatio;
     canvas.width = Math.max(1, Math.min(Math.round(canvas.clientWidth * dpr), maxSize));
     canvas.height = Math.max(1, Math.min(Math.round(canvas.clientHeight * dpr), maxSize));
-    device.queue.writeBuffer(uniformBuffer, 0, modelToClip(bounds, canvas.width / canvas.height));
-    // The depth buffer must match the canvas pixel for pixel, so it is
-    // replaced whenever the canvas changes size.
-    depthTexture?.destroy();
-    depthTexture = device.createTexture({
-      size: [canvas.width, canvas.height],
-      format: depthFormat,
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-    });
-    draw(depthTexture.createView());
+    render();
   }).observe(canvas);
+
+  // The render loop: draw every frame the browser shows, whether or not
+  // anything moved, and time the gaps between frames.
+  let previous: number | null = null;
+  let frames = 0;
+  const frame = (now: DOMHighResTimeStamp): void => {
+    if (previous !== null) {
+      intervals.push(now - previous);
+      if (intervals.length > 300) intervals.shift();
+    }
+    previous = now;
+    render();
+    if (++frames % 30 === 0) showFrameTimes();
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+  // A hidden tab gets no frames; the gap until it is shown again is not a slow frame.
+  document.addEventListener('visibilitychange', () => {
+    previous = null;
+  });
+
+  listenForOrbit();
 }
 
 main().catch((err: unknown) => {

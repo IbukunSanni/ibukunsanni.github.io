@@ -99,7 +99,7 @@ credited; the raytracer README and the dev.to profile link here.
 | # | Piece | Check | Status |
 |---|---|---|---|
 | 1 | WebGPU device, a triangle on screen, Vite + TypeScript, deployed to Pages | Live URL shows it | ✅ Live 3 Nov at [ibukunsanni.github.io](https://ibukunsanni.github.io/) (commit `8cfa9f6`, deploy 41 s), showing step 2's flat dragon, clean console |
-| 2 | Load the dragon (converted once to a binary vertex/index file), draw it lit, orbit and zoom | ~871k triangles at 60 fps; frame time on screen | -- |
+| 2 | Load the dragon (converted once to a binary vertex/index file), draw it lit, orbit and zoom | ~871k triangles at 60 fps; frame time on screen | ✅ 3 Nov: 60 fps at 1920×1080 on this laptop's Intel GPU, idle and orbiting (16.7 ms median, 17.0 ms 99th percentile, no frame over 20 ms in 360), shown top-left. See step 6 |
 | 2b | The stage: the dragon on a procedural stained-glass platform in a dark void (Voronoi panes, dark leading between them, light glowing through), all in WGSL | Still 60 fps with the platform in; no texture files, the glass is computed | -- |
 | 3 | Picking: a click casts a ray against a BVH over the dragon, on the CPU in TypeScript | The picked point is marked where the cursor was; pick time on screen | -- |
 | 4 | Fallback: no WebGPU, show a pre-rendered image from the raytracer | Tested with WebGPU disabled | Interim: a centred message on every failure path (3 Nov) |
@@ -116,7 +116,7 @@ read front to back; each step reads one chapter of WebGPU Fundamentals
 | 3 | **Uniform buffer and bind group.** A matrix moves the model | *Uniforms* | The model moves when the matrix changes | ✅ 3 Nov: a resize writes 64 bytes instead of 3,501,160; the frame identical to step 2's (hash `5359e105`, 443,210 lit pixels at 1148×824, 0 differing); re-fits at phone shape |
 | 4 | **Depth buffer.** Far triangles painting over near ones, then fixed | *Perspective Projection* | The nearest surface wins at every pixel, from any angle | ✅ 3 Nov, front view: reversing the draw order changed the frame without depth (`f44fe850` → `203c93ed`, mean red 142.4 → 73.4) and not with it (`9f182756` both ways), 443,210 pixels at 1148×824 throughout; production build identical, clean console, phone shape. Other angles re-checked in step 6 |
 | 5 | **Normals and Lambert shading** | *Directional Lighting* | The dragon lit, its brightness following the light | ✅ 3 Nov: light from the right lit the right silhouette edge (mean red 187.9) and left the left at 0; from the left, 189.0 and 0. Normals unit length, outward at the model's extremes, 18--25 ms on load. Production build identical (`b600ca8d` at 1148×824), clean console, phone shape |
-| 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown; step 4's depth check from orbited angles | -- |
+| 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown; step 4's depth check from orbited angles | ✅ 3 Nov: idle 16.7 ms median, 17.0 ms p99, 17.3 ms worst; orbiting 16.7, 16.9, 17.0 (360 frames each at 1920×1080). Triangles in reverse order gave identical frames from the front, back, above and side (1600×1000). Zoom clamped both ways; phone shape, production build, clean console |
 
 **Piece 2's data, simplest first.** Positions as `float32` and indices as `uint32`
 (the dragon has more than 65,535 vertices, so 16-bit indices cannot address
@@ -436,3 +436,39 @@ committed, so the page can serve it.
   darker than physical light would. Fixed later with an sRGB view of the
   canvas texture, not part of this step's check.
 - **`flat.wgsl` is now `lit.wgsl`.**
+
+**3 November, step 6.**
+
+- **The matrices are written by hand, for now.** Five functions in
+  `src/mat4.ts` (multiply, translation, scaling, two rotations, perspective),
+  each checked on known points first: near maps to depth 0 and far to 1, the
+  view's edges land on ±1, a quarter turn about y swings the front to the
+  right. The point of this step was seeing what the matrix does. Switch to
+  `wgpu-matrix` (WebGPU Fundamentals' author, WebGPU's 0..1 depth) when a
+  piece needs inverses or look-at; piece 3's picking will.
+- **One camera matrix, rebuilt every frame:** fit (centre to the origin,
+  farthest vertex at radius 1), turn (yaw, then pitch), back off, perspective.
+  Near and far hug the unit sphere, so the depth buffer's precision is spent
+  on the dragon. Zoom stays between 0.5 and 2, where the camera is still
+  outside the sphere and never inside the dragon.
+- **The light stays fixed in the world.** Orbiting to the back shows the
+  shadowed side (mean red 44 from behind against 151 from the front), which is
+  what a real light would do; a light that follows the camera is the
+  alternative if the back reads too dark.
+- **Every frame is drawn, moving or not.** Simplest, and the frame time needs
+  frames to measure. Drawing only when something changes would save power; a
+  later choice.
+- **Frame time is the gap between `requestAnimationFrame` callbacks.** That is
+  the rate the visitor sees, but this display runs at 60 Hz, so it caps at
+  16.7 ms and shows that each frame made it, not how much room was left. GPU
+  time per frame, through timestamp queries, would show the headroom; not
+  measured yet.
+- **The first orbited depth check was invalid, and why.** `indices.reverse()`
+  also reverses each triangle's corners, which flipped the normals inward
+  once they were computed from the reversed list; and a click during the run
+  moved the camera, which the silhouette's pixel count gave away (321,680
+  against 243,648). Rerun with whole triangles reversed after the normals
+  were computed, untouched: all four views identical.
+- **Not done:** two-finger pinch zoom on phones (one finger orbits); a
+  trackpad pinch arrives as a ctrl+wheel event and is handled, but only
+  tested with synthetic events, not on the real trackpad.
