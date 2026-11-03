@@ -4,11 +4,12 @@ import platformShader from './platform.wgsl?raw';
 import { loadMesh, vertexNormals } from './mesh.ts';
 import { multiply, perspective, rotationX, rotationY, scaling, translation, type Mat4 } from './mat4.ts';
 
-// Piece 2b, step 1: the Stanford dragon, 871k triangles read from a binary
+// Piece 2b, step 2: the Stanford dragon, 871k triangles read from a binary
 // file, drawn through an index buffer with a depth buffer, lit by one
-// directional light from normals computed on load, standing on a platform
-// drawn in the same pass, redrawn every frame from an orbit camera the visitor
-// turns and zooms, with the frame time on screen. See docs/ENGINEERING.md.
+// directional light from normals computed on load, standing on a platform of
+// glass panes drawn in the same pass, redrawn every frame from an orbit
+// camera the visitor turns and zooms, with the frame time on screen. See
+// docs/ENGINEERING.md.
 
 const canvas = document.querySelector<HTMLCanvasElement>('#viewer')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;

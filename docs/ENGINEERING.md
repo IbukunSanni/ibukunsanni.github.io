@@ -124,7 +124,7 @@ pixel in the fragment shader; no image files.
 | Step | Adds | Read first | Check | Status |
 |---|---|---|---|---|
 | 1 | **A second object.** The platform, a disc under the dragon's feet: its corners made in the vertex shader from `vertex_index`, with no vertex buffer, drawn in the same pass with the same camera and depth buffer | *Fundamentals* (its first triangle, made the same way) | The dragon stands on it; drawing the platform first or last gives identical frames, from above, level and below | ✅ 3 Nov: platform first or last, 0 pixels differed from above (`01320c5a`), level with the dragon's centre (`6942ad49`) and below (`807ecec0`) at 1600×1000. Still 60 fps at 1920×1080, idle and orbiting (16.7 ms median, 16.9 ms p99); production build identical, clean console, phone shape |
-| 2 | **Voronoi panes.** Random points on the disc; each pixel takes the colour of the nearest. Every point tested first, then only those in the 3×3 grid cells around the pixel | *The Book of Shaders*, *Cellular Noise* | Flat-coloured panes; the grid version's frame identical to testing every point | -- |
+| 2 | **Voronoi panes.** Random points on the disc; each pixel takes the colour of the nearest. Every point tested first, then only those in the 3×3 grid cells around the pixel | *The Book of Shaders*, *Cellular Noise* | Flat-coloured panes; the grid version's frame identical to testing every point | ✅ 3 Nov: 8 cells across, 0 pixels differed from below (`d8de70d2`, the whole disc) and above (`a8c2d917`) at 1600×1000; at 40 across, 2 differed until the points were kept off their cells' edges, then 0. Every point at 40 across: 83 ms median; the grid: 16.7. 60 fps at 1920×1080 idle and orbiting; production build identical, clean console, phone shape |
 | 3 | **The leading.** Dark lines along the pane borders, from each pixel's distance to the nearest border, anti-aliased with screen-space derivatives (`fwidth`) | Inigo Quilez, *Voronoi: distances to borders* | Lines of even width; no shimmer while orbiting | -- |
 | 4 | **Light through the glass.** Panes glowing in their colour, the void around them, the glow lighting the dragon from below, output in sRGB | *Timing Performance* (timestamp queries) | Piece 2b's check: 60 fps at 1920×1080 with the platform in, and GPU time per frame with and without it | -- |
 
@@ -507,3 +507,36 @@ committed, so the page can serve it.
 - **The camera still frames the dragon, not the platform.** On a phone the
   platform runs off both sides, and at the default pitch it is seen from only
   0.654 above. Framing and the default angle belong to step 4's look.
+
+**3 November, piece 2b, step 2.**
+
+- **One random point per grid cell, from a hash of the cell.** 8 cells
+  across the disc, about 50 panes on it. pcg2d (Jarzynski and Olano, 2020)
+  turns a cell's integer coordinates into two 32-bit numbers: 24 bits for
+  where its point sits, the rest for one of five glass colours. Integer
+  arithmetic, so the same bits on every GPU, and no texture or buffer of
+  points.
+- **Testing every point first, then 3×3 cells, compared pixel for pixel.**
+  Seen from directly below, the disc fills 1.14 million pixels with nothing
+  in front of it; the two searches gave identical frames there and from above.
+- **The prediction held, but only once there were enough panes.** With each
+  point anywhere in its cell, a point two cells away can be nearer than all
+  nine nearby, so the 3×3 search can be wrong. At 8 cells across no pixel
+  showed it; at 40 across (about 1,250 panes), 2 pixels were teal where the
+  nearest point was green.
+- **Fixed by keeping each point in the middle 60% of its cell**, not by
+  searching 5×5. From anywhere in a cell, its own point is then at most
+  0.8 × √2 = 1.13 cells away, and any point two cells over at least 1.2, so
+  the 3×3 search is never wrong: 0 pixels differed at 40 across and at 8. The
+  panes are a little more regular, still irregular to the eye.
+- **The grid's measured reason is scale, not today's speed.** At 8 cells
+  across (100 points against 9) both held 60 fps at 1920×1080, so frame time
+  cannot tell them apart; GPU time in step 4 can. At 40 across, every point
+  (1,764 per pixel) took 83 ms median and 167 ms p99, 12 fps; the grid held
+  16.7 ms. The grid's cost does not grow with the pane count.
+- **Testing every point is gone from the code** once it had served as the
+  reference; the comparison is recorded here.
+- **A production check that first failed.** The first run in a fresh tab
+  differed from the dev server at the starting view, before any drag; the
+  browser reported a click in that tab during the run. After a reload, all
+  three views matched. Probably the click moved the camera; not proven.
