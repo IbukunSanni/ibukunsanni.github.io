@@ -2,9 +2,11 @@ import './style.css';
 import shader from './flat.wgsl?raw';
 import { loadMesh } from './mesh.ts';
 
-// Piece 2, step 3: the Stanford dragon, 871k triangles read from a binary file,
-// drawn flat (a front view, no lighting yet) through an index buffer, placed on
-// screen by a matrix the GPU applies to every vertex. See docs/ENGINEERING.md.
+// Piece 2, step 4: the Stanford dragon, 871k triangles read from a binary file,
+// drawn from the front through an index buffer, placed on screen by a matrix
+// the GPU applies to every vertex, with a depth buffer so the nearest surface
+// wins at every pixel. Shaded by depth until step 5's lighting. See
+// docs/ENGINEERING.md.
 
 const canvas = document.querySelector<HTMLCanvasElement>('#viewer')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
@@ -36,7 +38,7 @@ function boundsOf(positions: Float32Array): Bounds {
 // of rewriting every vertex. Row by row:
 //   x' = (x - cx) * s / aspect   clip space spans -1..1 whatever the canvas's
 //   y' = (y - cy) * s            shape, so x is divided by the aspect ratio
-//   z' = 0.5 - (z - cz) * sz     nearer is smaller, inside 0..1 for step 4's depth test
+//   z' = 0.5 - (z - cz) * sz     nearer is smaller, inside 0..1 for the depth test
 //   w' = 1
 // WGSL matrices are column-major: the array lists column 0, then 1, 2, 3, and
 // the translation sits in the last column.
@@ -104,6 +106,11 @@ async function main(): Promise<void> {
   });
   const bounds = boundsOf(mesh.positions);
 
+  // One depth value per pixel: how near the surface drawn there so far is. A
+  // fragment is kept only if it is nearer ('less') than what its pixel holds,
+  // so which surface wins no longer depends on the order triangles arrive in.
+  const depthFormat = 'depth24plus';
+
   const module = device.createShaderModule({ code: shader });
   const pipeline = device.createRenderPipeline({
     layout: 'auto',
@@ -118,6 +125,7 @@ async function main(): Promise<void> {
       }],
     },
     fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+    depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
   });
 
   // Connects the uniform buffer to the shader's @group(0) @binding(0). With
@@ -129,7 +137,7 @@ async function main(): Promise<void> {
 
   // An arrow function, not a hoisted declaration, so TypeScript knows the
   // null check on `context` above has already run.
-  const draw = (): void => {
+  const draw = (depthView: GPUTextureView): void => {
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [{
@@ -138,6 +146,12 @@ async function main(): Promise<void> {
         loadOp: 'clear',
         storeOp: 'store',
       }],
+      depthStencilAttachment: {
+        view: depthView,
+        depthClearValue: 1.0, // the far end, so the first surface at a pixel always wins
+        depthLoadOp: 'clear',
+        depthStoreOp: 'discard', // needed only during the pass, never shown
+      },
     });
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
@@ -151,12 +165,21 @@ async function main(): Promise<void> {
   // Keep the drawing buffer at the canvas's real pixel size, so the image
   // stays sharp and undistorted, and refit and redraw whenever that size changes.
   const maxSize = device.limits.maxTextureDimension2D;
+  let depthTexture: GPUTexture | null = null;
   new ResizeObserver(() => {
     const dpr = window.devicePixelRatio;
     canvas.width = Math.max(1, Math.min(Math.round(canvas.clientWidth * dpr), maxSize));
     canvas.height = Math.max(1, Math.min(Math.round(canvas.clientHeight * dpr), maxSize));
     device.queue.writeBuffer(uniformBuffer, 0, modelToClip(bounds, canvas.width / canvas.height));
-    draw();
+    // The depth buffer must match the canvas pixel for pixel, so it is
+    // replaced whenever the canvas changes size.
+    depthTexture?.destroy();
+    depthTexture = device.createTexture({
+      size: [canvas.width, canvas.height],
+      format: depthFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    draw(depthTexture.createView());
   }).observe(canvas);
 }
 

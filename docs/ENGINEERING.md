@@ -114,9 +114,9 @@ read front to back; each step reads one chapter of WebGPU Fundamentals
 | 1 | **Vertex buffer.** The corners move from the shader into GPU memory | *Fundamentals*, *Vertex Buffers* | The same pixels as before (a refactor) | ✅ 3 Nov: fingerprint `137947c5`, 170,132 lit pixels at 1148×824, before and after |
 | 2 | **The data and an index buffer.** The dragon's PLY converted once to a binary file, drawn flat with step 1's pipeline | *Vertex Buffers*, its index-buffer section | Counts read from the PLY header; the binary reads back identical to the parse; the silhouette on screen | ✅ 3 Nov: 437,645 vertices, 871,414 triangles, 15.7 MB; round trip bit-identical, spot-checked independently; silhouette undistorted at desktop and phone shapes, production build, clean console |
 | 3 | **Uniform buffer and bind group.** A matrix moves the model | *Uniforms* | The model moves when the matrix changes | ✅ 3 Nov: a resize writes 64 bytes instead of 3,501,160; the frame identical to step 2's (hash `5359e105`, 443,210 lit pixels at 1148×824, 0 differing); re-fits at phone shape |
-| 4 | **Depth buffer.** Far triangles painting over near ones, then fixed | *Perspective Projection* | The nearest surface wins at every pixel, from any angle | -- |
+| 4 | **Depth buffer.** Far triangles painting over near ones, then fixed | *Perspective Projection* | The nearest surface wins at every pixel, from any angle | ✅ 3 Nov, front view: reversing the draw order changed the frame without depth (`f44fe850` → `203c93ed`, mean red 142.4 → 73.4) and not with it (`9f182756` both ways), 443,210 pixels at 1148×824 throughout; production build identical, clean console, phone shape. Other angles re-checked in step 6 |
 | 5 | **Normals and Lambert shading** | *Directional Lighting* | The dragon lit, its brightness following the light | -- |
-| 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown | -- |
+| 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown; step 4's depth check from orbited angles | -- |
 
 **Piece 2's data, simplest first.** Positions as `float32` and indices as `uint32`
 (the dragon has more than 65,535 vertices, so 16-bit indices cannot address
@@ -390,3 +390,21 @@ committed, so the page can serve it.
 - **The matrix already maps depth.** z goes to 0.5 - (z - cz)·sz, nearer
   smaller and inside 0..1, unused until step 4's depth test; without a depth
   buffer it only has to stay inside the clip range.
+
+**3 November, step 4.**
+
+- **Without a depth buffer, draw order decides the picture; with one, it
+  does not.** The fragment shader shades by depth (nearest brightest) so the
+  difference shows. At 1148×824: file order `f44fe850`, reversed order
+  `203c93ed` (mean red 142.4 → 73.4, the far side painted over the near),
+  and with the depth test `9f182756` in both orders, as predicted. The
+  silhouette was the same 443,210 pixels in all four: coverage never depends
+  on order, only whose colour lands.
+- **The file's own order was nearly right, by luck.** Without depth it
+  differed from the depth-tested frame at 72 pixels, every one the same or
+  darker (at most 6 of 255): a slightly farther surface drawn after a nearer
+  one. Measured by switching `depthCompare` to `'always'`, which reproduced
+  the no-depth hash exactly.
+- **The depth texture is replaced on every resize and never stored.** It
+  must match the canvas pixel for pixel, and nothing reads it after the pass,
+  so `depthStoreOp` is `'discard'`.

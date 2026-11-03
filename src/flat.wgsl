@@ -12,7 +12,10 @@ fn vs(@location(0) position: vec3f) -> @builtin(position) vec4f {
   return uniforms.modelToClip * vec4f(position, 1.0);
 }
 
+// Shaded by depth until step 5's lighting: in the fragment stage, position.z
+// is this fragment's depth, 0 at the near end of the model and 1 at the far end.
 @fragment
-fn fs() -> @location(0) vec4f {
-  return vec4f(0.95, 0.55, 0.2, 1.0);
+fn fs(@builtin(position) position: vec4f) -> @location(0) vec4f {
+  let shade = 1.0 - position.z;
+  return vec4f(vec3f(0.95, 0.55, 0.2) * shade, 1.0);
 }
