@@ -37,3 +37,44 @@ export async function loadMesh(url: string): Promise<Mesh> {
     triangleCount,
   };
 }
+
+// One normal per vertex, the direction the surface faces there, for lighting.
+//   for each triangle (a, b, c):
+//     n = (b - a) × (c - a)      perpendicular to the triangle, length 2 × its area
+//     add n to the sums at a, b and c
+//   normalise every sum
+// Adding n before normalising lets big triangles count for more than small
+// ones. Triangles wound counter-clockwise seen from outside, as the Stanford
+// scans are, give normals pointing outward. A vertex no triangle with any area
+// touches keeps (0, 0, 0).
+export function vertexNormals({ positions, indices, vertexCount }: Mesh): Float32Array {
+  const normals = new Float32Array(vertexCount * 3);
+  for (let t = 0; t < indices.length; t += 3) {
+    const a = indices[t] * 3;
+    const b = indices[t + 1] * 3;
+    const c = indices[t + 2] * 3;
+    const e1x = positions[b] - positions[a];
+    const e1y = positions[b + 1] - positions[a + 1];
+    const e1z = positions[b + 2] - positions[a + 2];
+    const e2x = positions[c] - positions[a];
+    const e2y = positions[c + 1] - positions[a + 1];
+    const e2z = positions[c + 2] - positions[a + 2];
+    const nx = e1y * e2z - e1z * e2y;
+    const ny = e1z * e2x - e1x * e2z;
+    const nz = e1x * e2y - e1y * e2x;
+    for (const v of [a, b, c]) {
+      normals[v] += nx;
+      normals[v + 1] += ny;
+      normals[v + 2] += nz;
+    }
+  }
+  for (let v = 0; v < normals.length; v += 3) {
+    const length = Math.sqrt(normals[v] ** 2 + normals[v + 1] ** 2 + normals[v + 2] ** 2);
+    if (length > 0) {
+      normals[v] /= length;
+      normals[v + 1] /= length;
+      normals[v + 2] /= length;
+    }
+  }
+  return normals;
+}

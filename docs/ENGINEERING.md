@@ -115,7 +115,7 @@ read front to back; each step reads one chapter of WebGPU Fundamentals
 | 2 | **The data and an index buffer.** The dragon's PLY converted once to a binary file, drawn flat with step 1's pipeline | *Vertex Buffers*, its index-buffer section | Counts read from the PLY header; the binary reads back identical to the parse; the silhouette on screen | ✅ 3 Nov: 437,645 vertices, 871,414 triangles, 15.7 MB; round trip bit-identical, spot-checked independently; silhouette undistorted at desktop and phone shapes, production build, clean console |
 | 3 | **Uniform buffer and bind group.** A matrix moves the model | *Uniforms* | The model moves when the matrix changes | ✅ 3 Nov: a resize writes 64 bytes instead of 3,501,160; the frame identical to step 2's (hash `5359e105`, 443,210 lit pixels at 1148×824, 0 differing); re-fits at phone shape |
 | 4 | **Depth buffer.** Far triangles painting over near ones, then fixed | *Perspective Projection* | The nearest surface wins at every pixel, from any angle | ✅ 3 Nov, front view: reversing the draw order changed the frame without depth (`f44fe850` → `203c93ed`, mean red 142.4 → 73.4) and not with it (`9f182756` both ways), 443,210 pixels at 1148×824 throughout; production build identical, clean console, phone shape. Other angles re-checked in step 6 |
-| 5 | **Normals and Lambert shading** | *Directional Lighting* | The dragon lit, its brightness following the light | -- |
+| 5 | **Normals and Lambert shading** | *Directional Lighting* | The dragon lit, its brightness following the light | ✅ 3 Nov: light from the right lit the right silhouette edge (mean red 187.9) and left the left at 0; from the left, 189.0 and 0. Normals unit length, outward at the model's extremes, 18--25 ms on load. Production build identical (`b600ca8d` at 1148×824), clean console, phone shape |
 | 6 | **Render loop, orbit, zoom, frame time on screen** | *Cameras* | Piece 2's check: 60 fps, median and 99th-percentile frame time shown; step 4's depth check from orbited angles | -- |
 
 **Piece 2's data, simplest first.** Positions as `float32` and indices as `uint32`
@@ -408,3 +408,31 @@ committed, so the page can serve it.
 - **The depth texture is replaced on every resize and never stored.** It
   must match the canvas pixel for pixel, and nothing reads it after the pass,
   so `depthStoreOp` is `'discard'`.
+
+**3 November, step 5.**
+
+- **Normals are computed on load, not stored in the file.** Each triangle's
+  cross product, area-weighted, summed at its corners and normalised:
+  18--25 ms for 437,645 vertices, against a download of a second or more.
+  Checked on the CPU first: every normal unit length (worst error 5·10⁻⁸),
+  none zero, and at the model's extremes they point outward (+x at the
+  rightmost vertex, −x at the leftmost, +y at the top, +z at the front), so
+  the scan's winding is counter-clockwise from outside.
+- **Brightness follows the light, measured at the silhouette.** An edge
+  pixel's normal points sideways, outward. Lit straight from the right, the
+  right edges averaged 187.9 red and the left 0; from the left, 189.0 and 0.
+  The two lights' shadows covered 46.4% and 54.0% of the dragon, 100.4%
+  together: every surface faces left or right, and the extra 0.4% faces the
+  viewer almost exactly, so it is black under both.
+- **Lambert alone, then ambient, for a measured reason.** With only Lambert,
+  13.2% of the dragon faced away from the light and was pure black, merging
+  into the background. A constant 0.15 ambient term lifts the darkest pixel
+  to red 36 (0.95 × 0.15 × 255) and leaves none black.
+- **Lit in model space.** Nothing rotates the dragon, so normals reach the
+  fragment shader unchanged and the light is a constant there. When step 6
+  adds a camera, only the view moves, so this still holds.
+- **Not yet gamma-correct.** The canvas is `bgra8unorm`, so the shader's
+  linear light values are displayed as if sRGB-encoded and the mid-tones read
+  darker than physical light would. Fixed later with an sRGB view of the
+  canvas texture, not part of this step's check.
+- **`flat.wgsl` is now `lit.wgsl`.**

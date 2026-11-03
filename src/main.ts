@@ -1,12 +1,12 @@
 import './style.css';
-import shader from './flat.wgsl?raw';
-import { loadMesh } from './mesh.ts';
+import shader from './lit.wgsl?raw';
+import { loadMesh, vertexNormals } from './mesh.ts';
 
-// Piece 2, step 4: the Stanford dragon, 871k triangles read from a binary file,
+// Piece 2, step 5: the Stanford dragon, 871k triangles read from a binary file,
 // drawn from the front through an index buffer, placed on screen by a matrix
 // the GPU applies to every vertex, with a depth buffer so the nearest surface
-// wins at every pixel. Shaded by depth until step 5's lighting. See
-// docs/ENGINEERING.md.
+// wins at every pixel, lit by one directional light from normals computed on
+// load. See docs/ENGINEERING.md.
 
 const canvas = document.querySelector<HTMLCanvasElement>('#viewer')!;
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
@@ -99,6 +99,16 @@ async function main(): Promise<void> {
   });
   device.queue.writeBuffer(vertexBuffer, 0, mesh.positions);
 
+  // A normal per vertex, in a second buffer beside the positions, copied once.
+  // Computed here rather than stored in the file: about 20 ms against a
+  // download of a second or more.
+  const normals = vertexNormals(mesh);
+  const normalBuffer = device.createBuffer({
+    size: normals.byteLength,
+    usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(normalBuffer, 0, normals);
+
   // One 4x4 float32 matrix, 64 bytes, rewritten whenever the canvas resizes.
   const uniformBuffer = device.createBuffer({
     size: 16 * 4,
@@ -117,12 +127,13 @@ async function main(): Promise<void> {
     vertex: {
       module,
       entryPoint: 'vs',
-      // How to read the buffer: step 12 bytes per vertex, and hand bytes 0-11
-      // of each step to the shader's @location(0) as three floats.
-      buffers: [{
-        arrayStride: 3 * 4,
-        attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }],
-      }],
+      // How to read the buffers: in each, step 12 bytes per vertex and hand
+      // the step's three floats to the shader, slot 0's to @location(0) (the
+      // position) and slot 1's to @location(1) (the normal).
+      buffers: [
+        { arrayStride: 3 * 4, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] },
+        { arrayStride: 3 * 4, attributes: [{ shaderLocation: 1, offset: 0, format: 'float32x3' }] },
+      ],
     },
     fragment: { module, entryPoint: 'fs', targets: [{ format }] },
     depthStencil: { format: depthFormat, depthWriteEnabled: true, depthCompare: 'less' },
@@ -156,6 +167,7 @@ async function main(): Promise<void> {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.setVertexBuffer(0, vertexBuffer);
+    pass.setVertexBuffer(1, normalBuffer);
     pass.setIndexBuffer(indexBuffer, 'uint32');
     pass.drawIndexed(mesh.triangleCount * 3);
     pass.end();
